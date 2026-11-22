@@ -33,6 +33,11 @@ app = FastAPI(
     title="Support Triage Agent API",
     version="1.0.0"
 )
+from fastapi.responses import RedirectResponse
+
+@app.get("/", include_in_schema=False)
+def home():
+    return RedirectResponse(url="/docs")
 from fastapi.responses import JSONResponse
 
 
