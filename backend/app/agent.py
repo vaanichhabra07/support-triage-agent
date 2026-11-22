@@ -13,9 +13,8 @@ from google import genai
 from google.genai import types
 
 # ─── Configuration ───────────────────────────────────────────────────────────
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("PROJECT_ID")
-LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
-MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+MODEL_NAME = os.environ.get("GEMINI_MODEL", "gemini-3.7-flash")
 
 SYSTEM_PROMPT = """You are a support triage agent. You are given a support ticket and
 documentation retrieved from that company's knowledge base. Produce a JSON response
@@ -40,10 +39,15 @@ _client = None
 
 def _get_client():
     global _client
+
     if _client is None:
-        if not PROJECT_ID:
-            raise ValueError("GOOGLE_CLOUD_PROJECT not set in the environment.")
-        _client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
+        api_key = os.environ.get("GEMINI_API_KEY")
+
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY not set in the environment.")
+
+        _client = genai.Client(api_key=api_key)
+
     return _client
 
 
@@ -66,6 +70,10 @@ def _extract_json(text: str) -> dict | None:
             pass
     return None
 
+class AgentServiceError(Exception):
+    def __init__(self, message: str, status_code: int = 503):
+        super().__init__(message)
+        self.status_code = status_code
 
 def _safe_escalation_response(reason: str = "LLM parse error") -> dict:
     return {
@@ -77,8 +85,15 @@ def _safe_escalation_response(reason: str = "LLM parse error") -> dict:
     }
 
 
+
 def process_ticket(issue: str, subject: str, company: str, retrieved_docs: str) -> dict:
-    client = _get_client()
+    try:
+        client = _get_client()
+    except ValueError as e:
+        raise AgentServiceError(
+            "Gemini configuration error: " + str(e),
+            status_code=500
+        ) from e
 
     user_message = f"""Support Ticket:
 - Subject: {subject}
@@ -102,19 +117,80 @@ status, product_area, response, justification, request_type"""
             ),
         )
 
-        if not response or not response.text:
-            return _safe_escalation_response("Empty LLM response")
-
-        parsed = _extract_json(response.text)
-        if not parsed:
-            return _safe_escalation_response("JSON parse failure")
-
-        required_keys = {"status", "product_area", "response", "justification", "request_type"}
-        for key in required_keys:
-            if key not in parsed:
-                parsed[key] = _safe_escalation_response(f"Missing field: {key}")[key]
-
-        return parsed
-
     except Exception as e:
-        return _safe_escalation_response(f"API error: {str(e)[:150]}")
+        # Gemini SDK exceptions commonly expose the HTTP status as .code
+        code = getattr(e, "code", None)
+        try:
+            code = int(code)
+        except (TypeError, ValueError):
+            code = None
+
+        if code == 429:
+            raise AgentServiceError(
+                "Gemini rate limit or quota exceeded.",
+                status_code=429
+            ) from e
+
+        if code == 503:
+            raise AgentServiceError(
+                "Gemini service temporarily unavailable.",
+                status_code=503
+            ) from e
+
+        if code == 404:
+            raise AgentServiceError(
+                "Configured Gemini model was not found or is unavailable.",
+                status_code=503
+            ) from e
+
+        raise AgentServiceError(
+            "Gemini request failed. Check backend logs.",
+            status_code=503
+        ) from e
+
+    if not response or not response.text:
+        raise AgentServiceError(
+            "Gemini returned an empty response.",
+            status_code=502
+        )
+
+    parsed = _extract_json(response.text)
+
+    if not isinstance(parsed, dict):
+        raise AgentServiceError(
+            "Gemini returned invalid JSON.",
+            status_code=502
+        )
+
+    required_keys = {
+        "status",
+        "product_area",
+        "response",
+        "justification",
+        "request_type",
+    }
+
+    if not required_keys.issubset(parsed):
+        raise AgentServiceError(
+            "Gemini response is missing required fields.",
+            status_code=502
+        )
+
+    if (
+        parsed["status"] not in ("replied", "escalated")
+        or parsed["request_type"]
+        not in ("product_issue", "feature_request", "bug", "invalid")
+        or any(
+            not isinstance(parsed[key], str)
+            for key in required_keys
+        )
+    ):
+        raise AgentServiceError(
+            "Gemini returned invalid classification fields.",
+            status_code=502
+        )
+
+    return parsed
+
+
+    

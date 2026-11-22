@@ -34,3 +34,11 @@ data/.chroma/
 *.db
 *.pyo
 backend/app/storage/
+# Additional environment secrets
+.env.*
+!.env.example
+
+# Additional local vector database paths
+chroma_db/
+chroma_data/
+chroma/
