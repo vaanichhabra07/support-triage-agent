@@ -42,3 +42,5 @@ backend/app/storage/
 chroma_db/
 chroma_data/
 chroma/
+backend/venv_render_test/
+backend/.env
